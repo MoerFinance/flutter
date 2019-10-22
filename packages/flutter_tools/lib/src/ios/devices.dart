@@ -18,6 +18,7 @@ import '../build_info.dart';
 import '../convert.dart';
 import '../device.dart';
 import '../globals.dart';
+import '../mdns_discovery.dart';
 import '../project.dart';
 import '../protocol_discovery.dart';
 import '../reporting/reporting.dart';
@@ -382,16 +383,40 @@ class IOSDevice extends Device {
         return LaunchResult.succeeded();
       }
 
+      Uri localUri;
       try {
         printTrace('Application launched on the device. Waiting for observatory port.');
-        final Uri localUri = await observatoryDiscovery.uri;
-        return LaunchResult.succeeded(observatoryUri: localUri);
+        localUri = await MDnsObservatoryDiscovery.instance.getObservatoryUri(
+          package.id,
+          this,
+          ipv6,
+          debuggingOptions.observatoryPort,
+        );
+        if (localUri != null) {
+          UsageEvent('ios-mdns', 'success').send();
+          return LaunchResult.succeeded(observatoryUri: localUri);
+        }
       } catch (error) {
-        printError('Failed to establish a debug connection with $id: $error');
-        return LaunchResult.failed();
+        printError('Failed to establish a debug connection with $id using mdns: $error');
+      }
+
+      // Fallback to manual protocol discovery.
+      UsageEvent('ios-mdns', 'failure').send();
+      printTrace('mDNS lookup failed, attempting fallback to reading device log.');
+      try {
+        printTrace('Waiting for observatory port.');
+        localUri = await observatoryDiscovery.uri;
+        if (localUri != null) {
+          UsageEvent('ios-mdns', 'fallback-success').send();
+          return LaunchResult.succeeded(observatoryUri: localUri);
+        }
+      } catch (error) {
+        printError('Failed to establish a debug connection with $id using logs: $error');
       } finally {
         await observatoryDiscovery?.cancel();
       }
+      UsageEvent('ios-mdns', 'fallback-failure').send();
+      return LaunchResult.failed();
     } finally {
       installStatus.stop();
     }
